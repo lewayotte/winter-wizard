@@ -52,7 +52,8 @@ window.WW = window.WW || {};
 
     /* ---- effective spell stats (with upgrades) ---- */
     cloudLife()  { return this.fx(WW.CONST.CLOUD_LIFE, 'life', 'cloudLifeMul'); }
-    cloudsMax()  { return this.game.level.cloudsMax + (this.has('cloudUp2') ? WW.UPGRADE_FX.cloudUp2.extraClouds : 0); }
+    cloudsMax()  { return WW.CONST.CLOUDS_MAX; }   // flat cap all game (5 of 7 lanes)
+    ambientCool() { return WW.CONST.PASSIVE_COOL + (this.has('embraceUp') ? WW.UPGRADE_FX.embraceUp.ambientAdd : 0) + (this.has('gripUp') ? WW.UPGRADE_FX.gripUp.ambientAdd : 0); }
     snowDps()    { return this.fx(WW.CONST.SNOW_DPS, 'dps', 'snowDpsMul'); }
     snowDur()    { return this.fx(WW.CONST.SNOW_DUR, 'dur', 'snowDurMul'); }
     windDur()    { return WW.CONST.WIND_DUR; }
@@ -68,13 +69,15 @@ window.WW = window.WW || {};
     /* ---- readiness ---- */
     isReady(id) { return this.cds[id] <= 0 && this.stuns[id] <= 0; }
 
-    /* Lock one random ready spell (stun ray hit). */
-    stunRandom(dur) {
-      const pool = this.spells.filter(s => this.stuns[s] <= 0);
-      if (!pool.length) return null;
-      const pick = pool[Math.floor(Math.random() * pool.length)];
-      this.stuns[pick] = Math.max(this.stuns[pick], dur);
-      return pick;
+    /* Stun ray hit: lock ALL spells for the duration.
+       (Blocked entirely if the castle lane has cloud cover.) */
+    stunAll(dur) {
+      let max = 0;
+      for (const s of this.spells) {
+        this.stuns[s] = Math.max(this.stuns[s] || 0, dur);
+        max = Math.max(max, this.stuns[s]);
+      }
+      return max;
     }
 
     /* Start a spell's cooldown. */

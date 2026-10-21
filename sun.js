@@ -41,10 +41,14 @@ window.WW = window.WW || {};
     pos() {
       const g = this.game;
       const p = this.p();
-      const peakY = g.H * 0.22;
-      const startY = g.groundY + 14;
-      const y = startY - (startY - peakY) * this.elev();
-      return { x: g.W * (0.06 + 0.88 * p), y };
+      // Wide arc: enters off-screen at the LEFT edge, sweeps high across
+      // the top of the sky, exits off-screen at the RIGHT edge. The ^0.5
+      // curve makes it climb fast, so it clears the cloud band quickly.
+      const lowY = g.groundY + 30;
+      const peakY = g.H * 0.16;
+      const rise = Math.pow(Math.sin(Math.PI * p), 0.5);
+      const y = lowY - (lowY - peakY) * rise;
+      return { x: g.W * (-0.14 + 1.28 * p), y };
     }
     /* 0 = calm, 1 = furious. Driven by temperature & how much sky is clouded. */
     anger() {
@@ -106,13 +110,21 @@ window.WW = window.WW || {};
         if (this.rayT <= 0) {
           this.rayT = this.nextInterval(this.level.ray);
           if (!g.rays.some(r => r.phase === 'charge' || r.phase === 'beam')) {
-            g.rays.push({ phase: 'charge', t: 0, dur: WW.CONST.RAY_CHARGE, lockDur: this.level.rayDur });
+            // snapshot castle cover at lock-on: if a cloud shields the castle
+            // when the ray targets it, the ray can be blocked even if that
+            // cloud burns away during the 1s charge
+            g.rays.push({
+              phase: 'charge', t: 0, dur: WW.CONST.RAY_CHARGE,
+              lockDur: this.level.rayDur,
+              coveredAtCharge: g.cloudsInLane(WW.CONST.CASTLE_LANE) > 0
+            });
             g.beep(220, 0.15, 'square');
           }
         }
       }
 
-      /* --- heat blasts (prefer the cloudiest lane: pierce one cloud) --- */
+      /* --- heat blasts (prefer the cloudiest lane, but never the castle
+         lane — blasts shouldn't strip your ray shield) --- */
       if (this.level.blast > 0) {
         this.blastT -= dt;
         if (this.blastT <= 0) {
@@ -121,9 +133,11 @@ window.WW = window.WW || {};
             let lane = Math.floor(Math.random() * WW.CONST.LANES);
             let best = -1;
             for (let i = 0; i < WW.CONST.LANES; i++) {
+              if (i === WW.CONST.CASTLE_LANE) continue;
               const n = g.cloudsInLane(i);
               if (n > best) { best = n; lane = i; }
             }
+            if (best <= 0) lane = Math.floor(Math.random() * WW.CONST.LANES);
             g.blasts.push({ phase: 'charge', t: 0, dur: WW.CONST.BLAST_CHARGE, lane, temp: this.level.blastTemp });
             g.beep(110, 0.3, 'sawtooth');
             g.toast('⚠️ HEAT BLAST CHARGING!', '#ff8040');

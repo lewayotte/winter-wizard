@@ -94,6 +94,7 @@ window.WW = window.WW || {};
       this.canvas.style.width = this.W + 'px';
       this.canvas.style.height = this.H + 'px';
       this.groundY = this.H * 0.78;
+      this.laneW = this.W / LANES;
       this.cloudY = this.groundY - Math.min(230, this.H * 0.33);
       // deterministic background stars
       this.bgStars = [];
@@ -104,7 +105,7 @@ window.WW = window.WW || {};
       }
       // ground decorations (deterministic)
       this.groundDeco = [];
-      const deco = ['🌲', '🌲', '🌲', '🌲', '⛄', '🌲', '🌲', '🎄', '🌲'];
+      const deco = ['🌲', '🌲', '🌲', '🌲', '🌲', '🌲', '🌲', '🎄', '🌲'];
       for (let i = 0; i < deco.length; i++) {
         this.groundDeco.push({
           e: deco[i],
@@ -126,7 +127,6 @@ window.WW = window.WW || {};
     }
 
     laneX(i) { return this.W / LANES * i; }
-    laneW() { return this.W / LANES; }
 
     /* ---------------- sound ---------------- */
     beep(freq, dur, type, vol) {
@@ -153,8 +153,17 @@ window.WW = window.WW || {};
 
     /* ---------------- state / levels ---------------- */
     toast(msg, color, dur) {
-      this.toasts.push({ msg, color: color || '#7fd4ff', t: 0, dur: dur || 2.4 });
-      if (this.toasts.length > 3) this.toasts.shift();
+      const d = dur || 2.4;
+      // dedupe: rapid repeat clicks refresh the existing toast instead of stacking
+      const existing = this.toasts.find(t => t.msg === msg);
+      if (existing) {
+        existing.t = 0;
+        existing.dur = d;
+        if (color) existing.color = color;
+        return;
+      }
+      this.toasts.push({ msg, color: color || '#7fd4ff', t: 0, dur: d });
+      if (this.toasts.length > 2) this.toasts.shift();
     }
     burst(x, y, emoji, n, spread) {
       for (let i = 0; i < n; i++) {
@@ -194,7 +203,24 @@ window.WW = window.WW || {};
       this.gifts = [];
       this.santa = null;
       this.santaDone = false;
+      this.hog = null;
+      this.hogScared = false;
+      this.hogLeft = false;
       this.stunHits = 0;
+      this.maxTemp = this.level.start;
+      this.castLock = 0;
+      this.giftResult = null;
+      this.novaReadyFlash = 0;
+      this.heldGift = WW.Save.data.gift || null;
+      if (this.level.special === 'christmas') {
+        // Christmas is a fresh-gift day: the slot resets to the wrapped 🎁,
+        // then refills with whatever Santa drops you this run.
+        this.heldGift = null;
+        if (WW.Save.data.gift) {
+          WW.Save.data.gift = null;
+          WW.Save.write();
+        }
+      }
       this.novaFlash = 0;
       this.shake = 0;
       this.paused = false;
@@ -228,7 +254,8 @@ window.WW = window.WW || {};
       return covered / LANES;
     }
     canPlaceCloud(lane) {
-      if (this.cloudsInLane(lane) >= C.CLOUD_STACK) return false;
+      // overwriting/refreshing the lane's existing cloud is always allowed
+      if (this.cloudsInLane(lane) > 0) return true;
       return this.clouds.filter(c => !c.dying).length < this.wizard.cloudsMax();
     }
     laneTopCloud(lane) {
@@ -248,19 +275,33 @@ window.WW = window.WW || {};
       const w = this.wizard;
       const id = w.selected;
       if (!w.spells.includes(id)) return;
+      if (this.castLock > 0) { this.beep(140, 0.05, 'sawtooth'); return; }
       if (w.stuns[id] > 0) { this.toast(WW.SPELLS[id].name + ' IS STUNNED! ⚡', '#ff5050'); this.flashErr = 0.5; return; }
       if (w.cds[id] > 0) { this.beep(140, 0.08, 'sawtooth'); return; }
 
       if (id === 'cloud') {
-        if (!this.canPlaceCloud(lane)) { this.toast('CANNOT PLACE CLOUD THERE 🚫', '#ff8080'); this.flashErr = 0.35; return; }
-        const stack = this.cloudsInLane(lane);
-        this.clouds.push({
-          lane, stack,
-          life: w.cloudLife(), max: w.cloudLife(),
-          seed: Math.random() * 10, raining: false, dying: false
-        });
+        const existing = this.laneTopCloud(lane);
+        const fresh = w.cloudLife();
+        if (existing) {
+          // overwrite: extend the existing cloud's life (remaining + fresh, capped at 2x fresh)
+          existing.life = Math.min(existing.life + fresh, fresh * 2);
+          existing.max = Math.max(existing.max, existing.life);
+          existing.born = this.t;
+        } else {
+          if (this.clouds.filter(c => !c.dying).length >= this.wizard.cloudsMax()) {
+            this.toast('CLOUD LIMIT (' + this.wizard.cloudsMax() + ') — SUN MELTS OLD ONES ☀️', '#ff8080');
+            this.flashErr = 0.35;
+            return;
+          }
+          this.clouds.push({
+            lane, stack: 0,
+            life: fresh, max: fresh,
+            seed: Math.random() * 10, raining: false, dying: false,
+            born: this.t
+          });
+        }
         this.lanes[lane].cloud = this.laneTopCloud(lane);
-        this.burst(this.laneX(lane) + this.laneW() / 2, this.cloudY - stack * 34, '☁️', 3, 60);
+        this.burst(this.laneX(lane) + this.laneW / 2, this.cloudY, '☁️', 3, 60);
         this.beep(300, 0.1, 'sine');
       } else if (id === 'snow') {
         const cloud = this.laneTopCloud(lane);
@@ -268,7 +309,10 @@ window.WW = window.WW || {};
         const L = this.lanes[lane];
         L.snow = w.snowDur();
         L.snowDps = w.snowDps();
-        this.burst(this.laneX(lane) + this.laneW() / 2, this.cloudY, '❄️', 5, 80);
+        // snowing sifts life out of the source cloud — cooling isn't free
+        cloud.life -= C.SNOW_DRAIN;
+        if (cloud.life <= 0) this.dissolveCloud(cloud, 'burn');
+        this.burst(this.laneX(lane) + this.laneW / 2, this.cloudY, '❄️', 5, 80);
         this.beep(880, 0.12, 'sine');
       } else if (id === 'wind') {
         const L = this.lanes[lane];
@@ -287,7 +331,7 @@ window.WW = window.WW || {};
             f.weakened = true;
           }
         }
-        this.burst(this.laneX(lane) + this.laneW() / 2, this.cloudY, '💨', 4, 90);
+        this.burst(this.laneX(lane) + this.laneW / 2, this.cloudY, '💨', 4, 90);
         this.beep(500, 0.18, 'triangle');
       } else if (id === 'rain') {
         const cloud = this.laneTopCloud(lane);
@@ -301,10 +345,12 @@ window.WW = window.WW || {};
       }
       w.cool(id);
       w.castAnim = 1;
+      this.castLock = C.WAND_LOCK;
     }
     castNova() {
       const w = this.wizard;
       if (!w.spells.includes('nova')) return;
+      if (this.castLock > 0) { this.beep(140, 0.05, 'sawtooth'); return; }
       if (w.stuns.nova > 0) { this.toast('NOVA IS STUNNED! ⚡', '#ff5050'); this.flashErr = 0.5; return; }
       if (w.cds.nova > 0) { this.beep(140, 0.08, 'sawtooth'); return; }
       this.temp = Math.max(0, this.temp - w.novaDrop());
@@ -312,6 +358,7 @@ window.WW = window.WW || {};
       this.shake = Math.max(this.shake, 0.5);
       w.cool('nova');
       w.castAnim = 1;
+      this.castLock = C.WAND_LOCK;
       for (let i = 0; i < 14; i++) {
         this.particles.push({
           x: rand(0, this.W), y: rand(this.H * 0.2, this.groundY),
@@ -351,38 +398,91 @@ window.WW = window.WW || {};
     }
     collectGift(gf) {
       gf.collected = true;
+      this.giftResult = { type: gf.type, collected: true };
       const G = WW.GIFTS[gf.type];
-      if (gf.type === 'cocoa') {
-        this.temp = this.level.start;
-        this.toast('☕ HOT COCOA — TEMP RESET!', '#ffd94a', 3);
-        this.confetti(10);
-      } else if (gf.type === 'globe') {
-        this.wizard.cds.nova = 0;
-        this.toast('🔮 SNOW GLOBE — NOVA RECHARGED!', '#9fdcff', 3);
-      } else {
+      if (gf.type === 'flashlight') {
         WW.Save.grantFlashlight();
-        this.toast('🔦 FLASHLIGHT... SOMETHING ILLUMINATED?', '#9fdcff', 4);
+        this.toast('🔦 FLASHLIGHT CAUGHT — IT WILL NOT MELT. KEEP IT... (???)', '#9fdcff', 4);
+      } else {
+        this.toast(G.icon + ' ' + G.name + ' — HELD! PRESS 6 TO USE', '#ffd94a', 4);
       }
+      // the slot holds exactly what Santa gave you (latest catch replaces)
+      this.heldGift = gf.type;
+      WW.Save.data.gift = gf.type;
+      WW.Save.write();
       this.burst(gf.x, gf.y, G.icon, 8, 140);
+      this.chord([523, 659, 784, 1047], 0.12, 'sine');
+    }
+    /* Use the held gift (key 6 or the 🎁 button). Santa's magic — works
+       even while stunned; consumes the slot. */
+    useGift() {
+      if (this.state !== 'play' || this.paused) return;
+      const type = this.heldGift;
+      if (!type) { this.toast('NO GIFT HELD — SANTA VISITS DAY 25 🎅', '#9db8dd'); return; }
+      const G = WW.GIFTS[type];
+      if (type === 'flashlight') {
+        // permanent key item — never consumed.
+        // FINALE MOMENT: shine it while the groundhog is on screen and he
+        // sees his shadow — winter extends! (3 bonus days)
+        if (this.hog && !this.hog.scared) {
+          this.hog.scared = true;
+          this.hog.hopT = 1;
+          this.hogScared = true;
+          WW.Save.unlockBonus();
+          this.toast('🦫 HE SAW HIS SHADOW! WINTER EXTENDED! ❄', '#ffd94a', 4);
+          this.confetti(30);
+          this.chord([392, 523, 659, 784], 0.15, 'triangle');
+        } else {
+          this.toast('🔦 THE FLASHLIGHT GLOWS STEADILY... (SOMETHING ABOUT DAY 45?)', '#9fdcff', 2.5);
+          const cx = this.laneX(WW.CONST.CASTLE_LANE) + this.laneW / 2;
+          this.burst(cx, this.cloudY - 40, '🔦', 4, 100);
+        }
+        return;
+      }
+      if (type === 'cocoa') {
+        this.temp = this.level.start;
+        this.confetti(10);
+        this.toast('☕ HOT COCOA — TEMP RESET!', '#ffd94a', 3);
+      } else if (type === 'globe') {
+        this.wizard.cds.nova = 0;
+        this.novaReadyFlash = 2.5;
+        this.toast('🔮 SNOW GLOBE — FROST NOVA RECHARGED! 🧊', '#9fdcff', 3.5);
+      }
+      this.heldGift = null;
+      WW.Save.data.gift = null;
+      WW.Save.write();
+      this.wizard.castAnim = 1;
+      const cx = this.laneX(WW.CONST.CASTLE_LANE) + this.laneW / 2;
+      this.burst(cx, this.cloudY - 40, G.icon, 10, 150);
       this.chord([523, 659, 784, 1047], 0.12, 'sine');
     }
 
     /* ---------------- win / lose ---------------- */
+    /* Star thresholds (same dynamic every day):
+       3★ = temperature never rose above the winter goal (30°F)
+       2★ = ...never above the warn line, (goal + limit) / 2
+       1★ = survived the day at all */
+    warnTemp() {
+      return (WW.CONST.AVG_WINTER + this.level.limit) / 2;
+    }
+    liveStars() {
+      const goal = WW.CONST.AVG_WINTER, warn = this.warnTemp();
+      return Math.max(1, 3 - (this.maxTemp > goal ? 1 : 0) - (this.maxTemp > warn ? 1 : 0));
+    }
     win() {
-      const marginOk = this.temp <= this.level.limit - C.STAR2_MARGIN;
-      const noStun = this.stunHits === 0;
-      const stars = 1 + (marginOk ? 1 : 0) + (noStun ? 1 : 0);
+      const goal = WW.CONST.AVG_WINTER, warn = this.warnTemp();
+      const stars = this.liveStars();
       WW.Save.setStars(this.levelNum, stars);
       let ceremony = null;
       if (this.level.special === 'finale') {
-        const shadow = WW.Save.data.flashlight;
-        if (shadow) WW.Save.unlockBonus();
+        const shadow = this.hogScared || WW.Save.data.bonus;
         ceremony = { shadow };
       }
       if (this.levelNum === WW.TOTAL_LEVELS) WW.Save.data.completed = true, WW.Save.write();
       this.end = {
-        win: true, stars, temp: this.temp, stunHits: this.stunHits,
-        marginOk, ceremony, starT: this.t, mhogT: this.t + 0.6
+        win: true, stars, temp: this.temp, maxTemp: this.maxTemp,
+        goal, warn, stunHits: this.stunHits,
+        ceremony, starT: this.t, mhogT: this.t + 0.6
       };
       this.state = 'end';
       this.unlockBanner = null;
@@ -393,7 +493,8 @@ window.WW = window.WW || {};
     lose() {
       this.end = {
         win: false,
-        temp: this.temp,
+        temp: this.temp, maxTemp: this.maxTemp,
+        goal: WW.CONST.AVG_WINTER, warn: this.warnTemp(),
         taunt: TAUNTS[Math.floor(Math.random() * TAUNTS.length)]
       };
       this.state = 'end';
@@ -440,7 +541,7 @@ window.WW = window.WW || {};
         if (isBonus && !WW.Save.data.bonus) continue;
         this.buttons.push({
           kind: 'level', id: 'lvl:' + n, num: n,
-          x: gx + col * (size + 6), y: gy + row * (size + 6) + (isBonus ? 18 : 0),
+          x: gx + col * (size + 6), y: gy + row * (size + 6),
           w: size, h: size,
           disabled: !unlocked,
           starCount: WW.Save.stars(n),
@@ -488,22 +589,26 @@ window.WW = window.WW || {};
       }
       if (this.state === 'play') {
         if (this.paused) { this.paused = false; return; }
-        // gifts first
+        // gifts first (catchable mid-air or on the ground)
         for (const gf of this.gifts) {
-          if (!gf.collected && gf.landed && Math.hypot(x - gf.x, y - gf.y) < 40) {
+          if (!gf.collected && Math.hypot(x - gf.x, y - gf.y) < 48) {
             this.collectGift(gf);
             return;
           }
         }
-        // spell bar
+        // spell bar (gift slot included when holding one)
         if (this.spellBarRects) {
           for (const b of this.spellBarRects) {
-            if (hit(b)) { this.selectSpell(b.id); return; }
+            if (hit(b)) {
+              if (b.id === 'gift') this.useGift();
+              else this.selectSpell(b.id);
+              return;
+            }
           }
         }
-        // lane cast
-        if (y < this.groundY) {
-          const lane = clamp(Math.floor(x / this.laneW()), 0, LANES - 1);
+        // lane cast — anywhere in the lane column (sky or ground), below the HUD
+        if (y > 62) {
+          const lane = clamp(Math.floor(x / this.laneW), 0, LANES - 1);
           this.tryCast(lane);
         }
       }
@@ -517,6 +622,7 @@ window.WW = window.WW || {};
           if (this.wizard.spells.includes(id)) this.selectSpell(id);
           return;
         }
+        if (k === '6') { this.useGift(); return; }
         if (k === 'p' || k === 'escape') { this.paused = !this.paused; return; }
         if (k === 'r') { this.startLevel(this.levelNum); return; }
       }
@@ -552,13 +658,20 @@ window.WW = window.WW || {};
       if (this.state === 'select') {
         this.hoverLane = -1;
       } else {
-        this.hoverLane = clamp(Math.floor(this.pointer.x / this.laneW()), 0, LANES - 1);
+        this.hoverLane = clamp(Math.floor(this.pointer.x / this.laneW), 0, LANES - 1);
       }
     }
 
     updatePlay(dt) {
       const lv = this.level;
       this.dayTime += dt;
+      if (this.unlockBanner) {
+        this.unlockBanner.t += dt;
+        if (this.unlockBanner.t > 5) this.unlockBanner = null;
+      }
+      if (this.temp > this.maxTemp) this.maxTemp = this.temp;
+      if (this.castLock > 0) this.castLock = Math.max(0, this.castLock - dt);
+      if (this.novaReadyFlash > 0) this.novaReadyFlash = Math.max(0, this.novaReadyFlash - dt);
       this.wizard.update(dt);
       this.sun.update(dt);
       const sf = this.sun.factor();
@@ -566,14 +679,14 @@ window.WW = window.WW || {};
       /* ---- temperature ---- */
       const coverage = this.coverageFrac();
       const heat = lv.heat * sf * (1 - coverage);
-      let cool = C.PASSIVE_COOL;
+      let cool = this.wizard.ambientCool();
       for (let i = 0; i < LANES; i++) {
         const L = this.lanes[i];
         if (L.snow > 0) cool += L.snowDps;
         if (L.wind > 0) cool += L.windDps;
         if (L.rain > 0) cool += L.rainDps;
       }
-      this.temp = clamp(this.temp + (heat - cool) * dt, 0, 999);
+      this.temp = clamp(this.temp + (heat - cool) * dt, C.MIN_TEMP, 999);
       if (this.temp > lv.limit) {
         this.burst(this.W / 2, this.groundY - 40, '♨️', 10, 200);
         this.lose();
@@ -602,7 +715,13 @@ window.WW = window.WW || {};
           L.rain -= dt;
           if (L.rain <= 0) {
             // rain dissolves the cloud it fell from
-            if (L.rainCloud && !L.rainCloud.dying) this.dissolveCloud(L.rainCloud, 'rain');
+            if (L.rainCloud && !L.rainCloud.dying) {
+              const wasCastle = L.rainCloud.lane === C.CASTLE_LANE;
+              this.dissolveCloud(L.rainCloud, 'rain');
+              if (wasCastle) {
+                this.toast('⚠ RAIN DISSOLVED YOUR CASTLE CLOUD! ☁️', '#ff8080');
+              }
+            }
             L.rainCloud = null;
           }
         }
@@ -613,10 +732,27 @@ window.WW = window.WW || {};
       for (const f of this.fireballs) {
         if (f.done) continue;
         f.t += dt;
+        const cloud = f.payload > 0 ? this.laneTopCloud(f.lane) : null;
+        if (cloud && f.t < f.dur) {
+          // Mid-flight interception: a guarding cloud catches the fireball
+          // at its surface — the fireball never reaches the ground.
+          const pos = this.fireballXY(f);
+          const csize = Math.min(this.laneW * 0.95, 185);
+          const cy = this.cloudY - (cloud.stack || 0) * csize * 0.42;
+          const lx = this.laneX(f.lane) + this.laneW / 2;
+          if (pos.y >= cy - 20 && Math.abs(pos.x - lx) < this.laneW * 0.7) {
+            f.done = true;
+            cloud.life -= C.FIRE_CLOUD_DMG;
+            this.burst(pos.x, pos.y, '🔥', 4, 70);
+            this.beep(160, 0.12, 'square');
+            if (cloud.life <= 0) this.dissolveCloud(cloud, 'burn');
+            continue;
+          }
+        }
         if (f.t >= f.dur) {
           f.done = true;
-          const cloud = this.laneTopCloud(f.lane);
           if (cloud && f.payload > 0) {
+            // fallback: a cloud placed late still soaks the hit
             cloud.life -= C.FIRE_CLOUD_DMG;
             this.burst(f.tx, this.cloudY - 20, '🔥', 3, 60);
             this.beep(160, 0.12, 'square');
@@ -640,17 +776,27 @@ window.WW = window.WW || {};
           r.t = 0;
           r.dur = 0.45;
           const castleLane = C.CASTLE_LANE;
-          const covered = this.cloudsInLane(castleLane) > 0;
+          // blocked if the castle lane is clouded now — OR was clouded when the
+          // ray locked on (that cloud sacrificed itself shielding the charge)
+          const covered = this.cloudsInLane(castleLane) > 0 || r.coveredAtCharge;
           if (covered) {
             r.blocked = true;
-            const cx = this.laneX(castleLane) + this.laneW() / 2;
-            this.burst(cx, this.cloudY - 10, '✨', 8, 120);
+            const cx = this.laneX(castleLane) + this.laneW / 2;
+            const cloud = this.laneTopCloud(castleLane);
+            const csize = Math.min(this.laneW * 0.95, 185);
+            // beam will stop at the cloud — record the impact point
+            r.blockX = cx;
+            r.blockY = cloud ? this.cloudY - (cloud.stack || 0) * csize * 0.42 : this.cloudY;
+            this.burst(r.blockX, r.blockY - csize * 0.15, '✨', 8, 120);
             this.toast('STUN RAY BLOCKED! ☁️', '#9fdcff');
             this.beep(880, 0.15, 'sine');
           } else {
-            const pick = this.wizard.stunRandom(r.lockDur);
+            this.wizard.stunAll(r.lockDur);
             this.stunHits++;
-            if (pick) this.toast('⚡ ' + WW.SPELLS[pick].name + ' LOCKED ' + Math.round(r.lockDur) + 's!', '#ff5050');
+            // recovery window: the sun holds its next ray until this stun
+            // EXPIRES plus a re-cover grace — one stun can never chain
+            this.sun.rayT = Math.max(this.sun.rayT, C.RAY_GRACE + r.lockDur);
+            this.toast('⚡ ALL SPELLS LOCKED ' + Math.round(r.lockDur) + 's!', '#ff5050');
             this.shake = Math.max(this.shake, 0.3);
             this.beep(90, 0.3, 'square');
           }
@@ -668,20 +814,15 @@ window.WW = window.WW || {};
           b.t = 0;
           b.dur = 0.4;
           const n = this.cloudsInLane(b.lane);
-          const cx = this.laneX(b.lane) + this.laneW() / 2;
-          if (n >= 2) {
-            // pierces the top cloud; the one beneath still blocks
-            const top = this.laneTopCloud(b.lane);
-            this.dissolveCloud(top, 'blast');
-            this.burst(cx, this.cloudY, '💥', 5, 120);
-            this.toast('BLAST PIERCED A CLOUD 💥 (blocked)', '#ffd94a');
-          } else if (n === 1) {
+          const cx = this.laneX(b.lane) + this.laneW / 2;
+          if (n >= 1) {
+            // pierces the lane's cloud: destroyed + partial heat leaks through
             const top = this.laneTopCloud(b.lane);
             this.dissolveCloud(top, 'blast');
             const leak = b.temp * C.BLAST_LEAK;
             this.temp += leak;
             this.burst(cx, this.cloudY, '💥', 6, 140);
-            this.toast('+' + Math.round(leak) + '° BLAST LEAKED THROUGH! 💥', '#ff8040');
+            this.toast('+' + Math.round(leak) + '° BLAST PIERCED YOUR CLOUD! 💥', '#ff8040');
             this.shake = Math.max(this.shake, 0.3);
           } else {
             this.temp += b.temp;
@@ -729,7 +870,29 @@ window.WW = window.WW || {};
           gf.life -= dt;
           if (gf.life <= 0) {
             gf.collected = true;
+            if (!this.giftResult) this.giftResult = { collected: false };
             this.toast('THE GIFT MELTED AWAY... 😢', '#9db8dd');
+          }
+        }
+      }
+
+      /* ---- groundhog (level 45 finale) ---- */
+      if (lv.special === 'finale') {
+        if (!this.hog && !this.hogScared && !this.hogLeft && this.sun.p() >= C.HOG_TIME) {
+          const sunVX = 1.28 * this.W / lv.day;   // the sun's x speed
+          this.hog = { x: -70, y: this.groundY + 36, vx: 2 * sunVX, scared: false, hopT: 0 };
+          this.toast('🦫 A GROUNDHOG WANDERS OUT...', '#ffd94a');
+          this.beep(200, 0.2, 'triangle');
+        }
+        if (this.hog) {
+          const h = this.hog;
+          if (h.scared) {
+            h.x -= h.vx * 3 * dt;   // flees home (right-to-left), fast
+            if (h.hopT > 0) h.hopT = Math.max(0, h.hopT - dt * 2);
+            if (h.x < -90) this.hog = null;
+          } else {
+            h.x += h.vx * dt;
+            if (h.x > this.W + 90) { this.hog = null; this.hogLeft = true; }
           }
         }
       }
@@ -744,7 +907,7 @@ window.WW = window.WW || {};
       if (c.dying) return;
       c.dying = true;
       c.dieT = 0.4;
-      const cx = this.laneX(c.lane) + this.laneW() / 2;
+      const cx = this.laneX(c.lane) + this.laneW / 2;
       const cy = this.cloudY - (c.stack || 0) * Math.max(34, this.H * 0.06);
       if (why === 'burn' || why === 'blast') {
         this.burst(cx, cy, '💨', 4, 100);

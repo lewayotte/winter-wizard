@@ -11,9 +11,11 @@ window.WW = window.WW || {};
 
   const defaults = () => ({
     stars: {},        // levelNumber (string) -> 0..3
-    flashlight: false,
+    flashlight: false,   // permanent finale key (set when Santa drops the flashlight)
     bonus: false,     // extended winter unlocked (groundhog finale)
     completed: false, // finished day 48
+    gift: null,       // the gift Santa last gave you: 'cocoa' | 'globe' | 'flashlight'
+    giftMigrated: false,
   });
 
   WW.Save = {
@@ -35,6 +37,14 @@ window.WW = window.WW || {};
             this.data.flashlight = !!parsed.flashlight;
             this.data.bonus = !!parsed.bonus;
             this.data.completed = !!parsed.completed;
+            this.data.gift = ['cocoa', 'globe', 'flashlight'].includes(parsed.gift) ? parsed.gift : null;
+            this.data.giftMigrated = !!parsed.giftMigrated;
+            // one-time heal: pre-inventory saves that caught the flashlight
+            if (this.data.flashlight && !this.data.gift && !this.data.giftMigrated) {
+              this.data.gift = 'flashlight';
+              this.data.giftMigrated = true;
+              this.write();
+            }
           }
         }
       } catch (e) { /* private mode / corrupt: keep defaults */ }
